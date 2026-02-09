@@ -1,0 +1,13 @@
+{
+  "name": "dj-decks-visualizer",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "npm run -w backend dev",
+    "build": "npm run -w frontend build && npm run -w backend build",
+    "start": "npm run -w backend start"
+  }
+}
