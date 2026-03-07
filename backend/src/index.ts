@@ -7,6 +7,25 @@ import { WebSocketServer } from 'ws';
 import { StageLinqBridge } from './stagelinqBridge.js';
 import type { DeckNumber, SnapshotPayload, WsPayload } from './types.js';
 import { ArtNetTimecodeBroadcaster } from './artnetTimecode.js';
+import { States, StageLinqValue } from "@gree44/stagelinq";
+
+function ensureState(state: StageLinqValue) {
+  if (!States.includes(state)) States.push(state);
+}
+
+// Total time (TrackLength) + KeyIndex (CurrentKeyIndex) for all decks
+[
+  StageLinqValue.EngineDeck1TrackTrackLength,
+  StageLinqValue.EngineDeck2TrackTrackLength,
+  StageLinqValue.EngineDeck3TrackTrackLength,
+  StageLinqValue.EngineDeck4TrackTrackLength,
+
+  StageLinqValue.EngineDeck1TrackCurrentKeyIndex,
+  StageLinqValue.EngineDeck2TrackCurrentKeyIndex,
+  StageLinqValue.EngineDeck3TrackCurrentKeyIndex,
+  StageLinqValue.EngineDeck4TrackCurrentKeyIndex,
+].forEach(ensureState);
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
