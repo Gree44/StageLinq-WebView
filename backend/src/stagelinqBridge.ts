@@ -71,6 +71,7 @@ export class StageLinqBridge {
   private blankDeck(deck: DeckNumber): DeckState {
     return {
       deck,
+      trackLoaded: false,
       title: "—",
       artist: "—",
       elapsedSec: 0,
@@ -86,6 +87,17 @@ export class StageLinqBridge {
       play: false,
       updatedAt: Date.now(),
     };
+  }
+
+  private unloadDeck(deck: DeckNumber) {
+    const fader = this.decks[deck].fader;
+    this.decks[deck] = this.blankDeck(deck);
+    this.decks[deck].fader = fader; // preserve fader position
+    this.sampleRateHz[deck] = null;
+    this.speedRaw[deck] = null;
+    this.speedNeutralRaw[deck] = null;
+    this.pendingTrackLengthSamples[deck] = null;
+    this.lastElapsedEmitSec[deck] = -1;
   }
 
   private touch(deck: DeckNumber) {
@@ -111,11 +123,18 @@ export class StageLinqBridge {
       ds.speed = (raw as number) / (neutral as number);
     }
 
-    // Track BPM derived from current BPM and speed ratio (ratio ~ 1.0).
-    if (Number.isFinite(ds.speed) && ds.speed > 0.0001 && Number.isFinite(ds.currentBpm)) {
+    // trackBpm should come from /Engine/DeckX/Track/CurrentBPM when available.
+    // Only use currentBpm/speed as a fallback if trackBpm is still unknown AND a track
+    // is confirmed loaded. Without the trackLoaded guard, deck-unload events (which reset
+    // trackBpm to 0) followed by beat messages would continuously recalculate trackBpm
+    // from the live currentBpm, making both fields show the same changing value.
+    if (ds.trackLoaded &&
+      (!Number.isFinite(ds.trackBpm) || ds.trackBpm <= 0) &&
+      Number.isFinite(ds.speed) &&
+      ds.speed > 0.0001 &&
+      Number.isFinite(ds.currentBpm) &&
+      ds.currentBpm > 0) {
       ds.trackBpm = ds.currentBpm / ds.speed;
-    } else {
-      ds.trackBpm = 0;
     }
   }
   private coerceBool(v: any): boolean | undefined {
@@ -400,6 +419,16 @@ export class StageLinqBridge {
         }
       }
 
+      // ---- Original / analyzed track BPM ----
+      if (/(Track\/)?CurrentBPM$/i.test(tail) && /Track\//i.test(tail) && typeof rawValue === "number") {
+        ds.trackBpm = rawValue;
+        this.touch(deck);
+
+        if (!Number.isFinite(ds.currentBpm) || ds.currentBpm <= 0) {
+          ds.currentBpm = rawValue;
+        }
+      }
+
       // Sometimes key comes as a string (already Camelot like "8A")
       if (/(Track\/)?(Camelot|Key)$/i.test(tail) && typeof rawValue === "string" && rawValue.trim()) {
         ds.keyCamelot = rawValue.trim();
@@ -448,13 +477,35 @@ export class StageLinqBridge {
       }
 
       // ---- Track title / artist (keep your exact matches, plus fallback patterns) ----
-      if ((/SongName$/i.test(tail) || /Title$/i.test(tail)) && typeof rawValue === "string" && rawValue.trim()) {
-        ds.title = rawValue;
-        this.touch(deck);
+      if (/SongName$/i.test(tail) || /Title$/i.test(tail)) {
+        if (typeof rawValue === "string") {
+          if (rawValue.trim()) {
+            ds.title = rawValue;
+            ds.trackLoaded = true;
+          } else {
+            // Empty title signals track was ejected
+            this.unloadDeck(deck);
+          }
+          this.touch(deck);
+        }
       }
       if ((/ArtistName$/i.test(tail) || /Artist$/i.test(tail)) && typeof rawValue === "string" && rawValue.trim()) {
         ds.artist = rawValue;
+        ds.trackLoaded = true;
         this.touch(deck);
+      }
+
+      // ---- Explicit track-loaded flag (some devices emit this) ----
+      if (/TrackIsLoaded$/i.test(tail) || /IsLoaded$/i.test(tail)) {
+        const loaded = this.coerceBool(rawValue);
+        if (typeof loaded === "boolean") {
+          if (!loaded) {
+            this.unloadDeck(deck);
+          } else {
+            ds.trackLoaded = true;
+          }
+          this.touch(deck);
+        }
       }
 
       // ---- Play state (edge-detected) ----
@@ -488,15 +539,27 @@ export class StageLinqBridge {
 
 
       const ds = this.decks[deck];
-      ds.title = status?.title || ds.title || "—";
-      ds.artist = status?.artist || ds.artist || "—";
+      if (status?.title && String(status.title).trim()) {
+        ds.title = status.title;
+        ds.trackLoaded = true;
+      } else {
+        ds.title = ds.title || "—";
+      }
+      if (status?.artist && String(status.artist).trim()) {
+        ds.artist = status.artist;
+        ds.trackLoaded = true;
+      } else {
+        ds.artist = ds.artist || "—";
+      }
 
       // Some builds include key info in nowPlaying
       if (typeof status?.currentKeyIndex === "number") ds.keyIndex = status.currentKeyIndex;
       if (typeof status?.keyIndex === "number") ds.keyIndex = status.keyIndex;
 
 
-      if (typeof status?.currentBpm === "number") ds.currentBpm = status.currentBpm;
+      if (typeof status?.currentBpm === "number") {
+        ds.currentBpm = status.currentBpm;
+      }
       if (typeof status?.externalMixerVolume === "number") {
         ds.fader = clamp01(status.externalMixerVolume);
       }
@@ -553,7 +616,9 @@ export class StageLinqBridge {
 
 
 
-        if (typeof payload.bpm === "number") ds.currentBpm = payload.bpm;
+        if (typeof payload.bpm === "number") {
+          ds.currentBpm = payload.bpm;
+        }
 
         this.recomputeDerived(deck);
         this.touch(deck);
@@ -568,7 +633,9 @@ export class StageLinqBridge {
           if (!DECKS.includes(deck)) return;
 
           const ds = this.decks[deck];
-          if (typeof d?.bpm === "number") ds.currentBpm = d.bpm;
+          if (typeof d?.bpm === "number") {
+            ds.currentBpm = d.bpm;
+          }
 
           // Prefer samples + sampleRate (ArtNet-style) if available
           if (typeof d?.samples === "number") {
@@ -621,16 +688,28 @@ export class StageLinqBridge {
 
       if (tail === "TrackLength" || tail === "Track/TrackLength") {
         if (typeof value === "number") ds.totalSec = Math.max(0, value);
-      } else if (tail === "CurrentBPM" || tail === "Track/CurrentBPM") {
-        if (typeof value === "number") ds.currentBpm = value;
+      } else if (tail === "CurrentBPM") {
+        if (typeof value === "number") {
+          ds.currentBpm = value;
+        }
+      } else if (tail === "Track/CurrentBPM") {
+        if (typeof value === "number") {
+          ds.trackBpm = value;
+        }
       } else if (tail === "Speed" || tail === "Track/Speed") {
         if (typeof value === "number") ds.speed = value;
       } else if (tail === "ExternalMixerVolume" || tail === "Track/ExternalMixerVolume") {
         if (typeof value === "number") ds.fader = clamp01(value);
       } else if (tail === "ArtistName" || tail === "Track/ArtistName") {
-        if (typeof value === "string" && value.trim()) ds.artist = value;
+        if (typeof value === "string") {
+          if (value.trim()) { ds.artist = value; ds.trackLoaded = true; }
+          else this.unloadDeck(deck);
+        }
       } else if (tail === "SongName" || tail === "Track/SongName") {
-        if (typeof value === "string" && value.trim()) ds.title = value;
+        if (typeof value === "string") {
+          if (value.trim()) { ds.title = value; ds.trackLoaded = true; }
+          else this.unloadDeck(deck);
+        }
       } else if (tail === "CurrentKeyIndex" || tail === "Track/CurrentKeyIndex") {
         if (typeof value === "number") ds.keyIndex = value;
       } else if (tail === "Play" || tail === "PlayState") {

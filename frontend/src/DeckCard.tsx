@@ -30,13 +30,14 @@ export default function DeckCard(props: {
   const themeClass = `theme-d${deck}`;
   const faderOnRight = deck === 1 || deck === 3;
 
-  const elapsed = useMemo(() => formatMMSS(state.elapsedSec), [state.elapsedSec]);
-  const total = useMemo(() => formatMMSS(state.totalSec), [state.totalSec]);
-  const remaining = useMemo(() => formatMMSS(Math.max(0, state.totalSec - state.elapsedSec)), [state.totalSec, state.elapsedSec]);
+  const elapsed = useMemo(() => state.trackLoaded ? formatMMSS(state.elapsedSec) : '00:00', [state.trackLoaded, state.elapsedSec]);
+  const total = useMemo(() => state.trackLoaded ? formatMMSS(state.totalSec) : '00:00', [state.trackLoaded, state.totalSec]);
+  const remaining = useMemo(() => state.trackLoaded ? formatMMSS(Math.max(0, state.totalSec - state.elapsedSec)) : '00:00', [state.trackLoaded, state.totalSec, state.elapsedSec]);
 
-  const bpm = Number.isFinite(state.currentBpm) ? state.currentBpm.toFixed(2) : '—';
-  const trackBpm = Number.isFinite(state.trackBpm) && state.trackBpm > 0 ? state.trackBpm.toFixed(2) : '—';
-  const rel = signedPercent(state.speed);
+  const loaded = state.trackLoaded;
+  const bpm = loaded && Number.isFinite(state.currentBpm) && state.currentBpm > 0 ? state.currentBpm.toFixed(2) : '—';
+  const trackBpm = loaded && Number.isFinite(state.trackBpm) && state.trackBpm > 0 ? state.trackBpm.toFixed(2) : '—';
+  const rel = loaded ? signedPercent(state.speed) : '—';
 
   const faderPct = Math.round((state.fader ?? 0) * 100);
 
@@ -51,15 +52,15 @@ export default function DeckCard(props: {
 
         <div className="titleBlock">
           <div className="title" title={state.title}>
-            {state.play ? <span className="playDot" /> : null}
-            {state.title || '—'}
+            {state.trackLoaded && state.play ? <span className="playDot" /> : null}
+            {state.trackLoaded ? (state.title || '—') : '—'}
           </div>
           <div className="artist" title={state.artist}>{state.artist || '—'}</div>
         </div>
 
         <div className="stats">
           <div className="pills">
-            <span className="pill">Key: <strong>{state.keyCamelot || '--'}</strong></span>
+            <span className="pill">Key: <strong>{state.trackLoaded ? (state.keyCamelot || '--') : '--'}</strong></span>
             <span className="pill">{connected ? 'LIVE' : 'OFFLINE'}</span>
           </div>
 

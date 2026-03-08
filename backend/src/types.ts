@@ -2,6 +2,7 @@ export type DeckNumber = 1 | 2 | 3 | 4;
 
 export interface DeckState {
   deck: DeckNumber;
+  trackLoaded: boolean; // true only when a track is loaded to this deck
   title: string;
   artist: string;
   elapsedSec: number; // BeatInfo timeline (seconds)
