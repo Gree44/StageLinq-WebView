@@ -1,8 +1,9 @@
 import type { DeckNumber, DeckState } from "./types.js";
 import { keyIndexToCamelot } from "./camelot.js";
-import { extractMetadataFromDevice } from "@gree44/stagelinq/dist/metadata/index.js";
+import { DbConnection } from "@gree44/stagelinq/dist/Databases/index.js";
 
 import * as pkg from "@gree44/stagelinq";
+import { count } from "console";
 
 
 // Resolve StageLinq export shape (some versions export default, some export { StageLinq }).
@@ -55,13 +56,6 @@ export class StageLinqBridge {
     4: null,
   };
 
-  private trackNetworkPath: Record<DeckNumber, string | null> = {
-    1: null,
-    2: null,
-    3: null,
-    4: null,
-  };
-
   // Raw speed values as published by StageLinq.
   // On some devices /Engine/DeckX/Speed is *not* a direct ratio where 1.0 == neutral.
   // Instead, neutral is whatever /Engine/DeckX/SpeedNeutral reports.
@@ -84,28 +78,56 @@ export class StageLinqBridge {
     this.wire();
   }
 
-  private async fetchTrackBpm(deck: DeckNumber, networkPath: string) {
+  private async fetchTrackBpm(deck: DeckNumber, dbSourceName: string, trackPath: string) {
+    let connection: DbConnection | null = null;
+
     try {
-      const fileTransfer = StageLinq.devices.fileTransferService;
-      if (!fileTransfer) return;
+      const dbPath = StageLinq.databases.getDbPath(dbSourceName);
+      connection = new DbConnection(dbPath);
 
-      const meta = await extractMetadataFromDevice(fileTransfer, networkPath);
-      if (!meta) return;
-
-      const ds = this.decks[deck];
+      const track = connection.getTrackInfo(trackPath);
+      if (!track) {
+        if (LOG_CONFIG.metadata) {
+          console.log("[DB] no track found:", { deck, dbSourceName, trackPath });
+        }
+        return;
+      }
 
       const bpm =
-        (typeof meta.bpm === "number" ? meta.bpm : undefined);
+        (typeof track.bpmAnalyzed === "number" && track.bpmAnalyzed > 0 ? track.bpmAnalyzed : undefined) ??
+        (typeof track.bpm === "number" && track.bpm > 0 ? track.bpm : undefined);
 
       if (typeof bpm === "number" && bpm > 0) {
+        const ds = this.decks[deck];
         ds.trackBpm = bpm;
         ds.trackLoaded = true;
         this.touch(deck);
 
-        if (LOG_CONFIG.metadata) console.log("[META] trackBpm from metadata:", deck, bpm);
+        if (LOG_CONFIG.metadata) {
+          console.log("[DB] analyzed trackBpm:", deck, {
+            bpmAnalyzed: track.bpmAnalyzed,
+            bpm: track.bpm,
+            chosen: bpm,
+            title: track.title,
+            path: track.path,
+          });
+        }
+      } else {
+        if (LOG_CONFIG.metadata) {
+          console.log("[DB] track found but no BPM:", deck, {
+            bpmAnalyzed: track.bpmAnalyzed,
+            bpm: track.bpm,
+            title: track.title,
+            path: track.path,
+          });
+        }
       }
     } catch (err) {
-      if (LOG_CONFIG.errors) console.warn("metadata fetch failed:", err);
+      if (LOG_CONFIG.errors) {
+        console.warn("[DB] failed to read analyzed BPM:", { deck, dbSourceName, trackPath, err });
+      }
+    } finally {
+      connection?.close();
     }
   }
 
@@ -139,7 +161,6 @@ export class StageLinqBridge {
     this.speedNeutralRaw[deck] = null;
     this.pendingTrackLengthSamples[deck] = null;
     this.lastElapsedEmitSec[deck] = -1;
-    this.trackNetworkPath[deck] = null;
   }
 
   private touch(deck: DeckNumber) {
@@ -274,6 +295,7 @@ export class StageLinqBridge {
 
   private wire() {
     const devices = StageLinq.devices;
+    console.log("----------------------------------------------------------------------------------------\n LOL 3 \n----------------------------------------------------------------------------------------");
 
     // Different versions use different lifecycle event names; listen to both.
     devices.on?.("ready", (info: any) => {
@@ -347,27 +369,6 @@ export class StageLinqBridge {
 
       const tail = m[2];
       const ds = this.decks[deck];
-
-      if (/TrackNetworkPath$/i.test(tail) && typeof rawValue === "string") {
-        const path = rawValue.trim();
-
-        if (!path) {
-          this.unloadDeck(deck);
-          return;
-        }
-
-        const changed = this.trackNetworkPath[deck] !== path;
-
-        ds.trackLoaded = true;
-        this.trackNetworkPath[deck] = path;
-        this.touch(deck);
-
-        if (changed) {
-          ds.trackBpm = 0;
-          this.fetchTrackBpm(deck, path);
-          if (LOG_CONFIG.metadata) console.log("[TRACK PATH]", deck, path);
-        }
-      }
 
       // TrackData often contains duration + key info on Prime/Denon
       if (/(Track\/)?TrackData$/i.test(tail)) {
@@ -562,6 +563,42 @@ export class StageLinqBridge {
 
     });
 
+    devices.on?.("trackLoaded", async (status: any) => {
+      const layer = String(status?.layer ?? "");
+      const deck =
+        layer === "A" ? 1 :
+          layer === "B" ? 2 :
+            layer === "C" ? 3 :
+              layer === "D" ? 4 :
+                null;
+
+      if (!deck) return;
+
+      const ds = this.decks[deck];
+      ds.trackLoaded = true;
+      ds.trackBpm = 0;
+      this.touch(deck);
+
+      const dbSourceName = status?.dbSourceName;
+      const trackPath = status?.trackPath;
+
+      if (LOG_CONFIG.metadata) {
+        console.log("[TRACK LOADED]", {
+          deck,
+          title: status?.title,
+          artist: status?.artist,
+          dbSourceName,
+          trackPath,
+        });
+      }
+
+      console.log("----------------------------------------------------------------------------------------\n LOL 1 \n----------------------------------------------------------------------------------------");
+      if (typeof dbSourceName === "string" && dbSourceName && typeof trackPath === "string" && trackPath) {
+        console.log("----------------------------------------------------------------------------------------\n LOL 2 \n----------------------------------------------------------------------------------------");
+        await this.fetchTrackBpm(deck, dbSourceName, trackPath);
+      }
+    });
+
 
 
     // nowPlaying provides high-level track + some realtime values.
@@ -750,7 +787,12 @@ export class StageLinqBridge {
   }
 
   async connect() {
-    // stagelinq package exposes static connect().
+    StageLinq.options = {
+      ...(StageLinq.options ?? {}),
+      downloadDbSources: true,
+      enableFileTranfer: true,
+    };
+
     await StageLinq.connect();
   }
 
