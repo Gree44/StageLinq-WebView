@@ -1,11 +1,20 @@
 import type { DeckNumber, DeckState } from "./types.js";
 import { keyIndexToCamelot } from "./camelot.js";
+import { extractMetadataFromDevice } from "@gree44/stagelinq/dist/metadata/index.js";
 
 import * as pkg from "@gree44/stagelinq";
 
 
 // Resolve StageLinq export shape (some versions export default, some export { StageLinq }).
 const StageLinq: any = (pkg as any).StageLinq ?? (pkg as any).default ?? pkg;
+
+export const LOG_CONFIG = {
+  lifecycle: true,   // StageLinq connected, ready, etc.
+  discover: false,   // [DISCOVER] logs for figuring out new endpoints
+  playback: true,    // [Playback] START/STOP logs
+  metadata: true,    // [META] and [TRACK PATH] logs
+  errors: true       // StageLinq error warnings
+};
 
 const DECKS: DeckNumber[] = [1, 2, 3, 4];
 
@@ -46,6 +55,13 @@ export class StageLinqBridge {
     4: null,
   };
 
+  private trackNetworkPath: Record<DeckNumber, string | null> = {
+    1: null,
+    2: null,
+    3: null,
+    4: null,
+  };
+
   // Raw speed values as published by StageLinq.
   // On some devices /Engine/DeckX/Speed is *not* a direct ratio where 1.0 == neutral.
   // Instead, neutral is whatever /Engine/DeckX/SpeedNeutral reports.
@@ -66,6 +82,31 @@ export class StageLinqBridge {
     ) as Record<DeckNumber, DeckState>;
 
     this.wire();
+  }
+
+  private async fetchTrackBpm(deck: DeckNumber, networkPath: string) {
+    try {
+      const fileTransfer = StageLinq.devices.fileTransferService;
+      if (!fileTransfer) return;
+
+      const meta = await extractMetadataFromDevice(fileTransfer, networkPath);
+      if (!meta) return;
+
+      const ds = this.decks[deck];
+
+      const bpm =
+        (typeof meta.bpm === "number" ? meta.bpm : undefined);
+
+      if (typeof bpm === "number" && bpm > 0) {
+        ds.trackBpm = bpm;
+        ds.trackLoaded = true;
+        this.touch(deck);
+
+        if (LOG_CONFIG.metadata) console.log("[META] trackBpm from metadata:", deck, bpm);
+      }
+    } catch (err) {
+      if (LOG_CONFIG.errors) console.warn("metadata fetch failed:", err);
+    }
   }
 
   private blankDeck(deck: DeckNumber): DeckState {
@@ -98,6 +139,7 @@ export class StageLinqBridge {
     this.speedNeutralRaw[deck] = null;
     this.pendingTrackLengthSamples[deck] = null;
     this.lastElapsedEmitSec[deck] = -1;
+    this.trackNetworkPath[deck] = null;
   }
 
   private touch(deck: DeckNumber) {
@@ -110,31 +152,16 @@ export class StageLinqBridge {
 
     if (!this.seen.key && ds.keyIndex != null) {
       this.seen.key = true;
-      console.log("[DISCOVER] KeyIndex value:", ds.keyIndex, "->", ds.keyCamelot);
+      if (LOG_CONFIG.discover) console.log("[DISCOVER] KeyIndex value:", ds.keyIndex, "->", ds.keyCamelot);
     }
 
     // Normalize raw speed to a real ratio when possible.
     // If SpeedNeutral is present, use ratio = raw / neutral.
-    // Otherwise assume ds.speed already is a ratio.
     const raw = this.speedRaw[deck];
     const neutral = this.speedNeutralRaw[deck];
 
     if (Number.isFinite(raw) && Number.isFinite(neutral) && (neutral as number) > 0) {
       ds.speed = (raw as number) / (neutral as number);
-    }
-
-    // trackBpm should come from /Engine/DeckX/Track/CurrentBPM when available.
-    // Only use currentBpm/speed as a fallback if trackBpm is still unknown AND a track
-    // is confirmed loaded. Without the trackLoaded guard, deck-unload events (which reset
-    // trackBpm to 0) followed by beat messages would continuously recalculate trackBpm
-    // from the live currentBpm, making both fields show the same changing value.
-    if (ds.trackLoaded &&
-      (!Number.isFinite(ds.trackBpm) || ds.trackBpm <= 0) &&
-      Number.isFinite(ds.speed) &&
-      ds.speed > 0.0001 &&
-      Number.isFinite(ds.currentBpm) &&
-      ds.currentBpm > 0) {
-      ds.trackBpm = ds.currentBpm / ds.speed;
     }
   }
   private coerceBool(v: any): boolean | undefined {
@@ -186,14 +213,14 @@ export class StageLinqBridge {
       this.touch(deck);
       if (!this.seen.total) {
         this.seen.total = true;
-        console.log("[DISCOVER] totalSec from TrackData (ms):", deck, ds.totalSec);
+        if (LOG_CONFIG.discover) console.log("[DISCOVER] totalSec from TrackData (ms):", deck, ds.totalSec);
       }
     } else if (typeof durSec === "number" && durSec > 0) {
       ds.totalSec = durSec;
       this.touch(deck);
       if (!this.seen.total) {
         this.seen.total = true;
-        console.log("[DISCOVER] totalSec from TrackData (s):", deck, ds.totalSec);
+        if (LOG_CONFIG.discover) console.log("[DISCOVER] totalSec from TrackData (s):", deck, ds.totalSec);
       }
     }
 
@@ -209,9 +236,8 @@ export class StageLinqBridge {
       this.touch(deck);
       if (!this.seen.key) {
         this.seen.key = true;
-        console.log("[DISCOVER] keyIndex from TrackData:", deck, keyIdx, "->", ds.keyCamelot);
+        if (LOG_CONFIG.discover) console.log("[DISCOVER] keyIndex from TrackData:", deck, keyIdx, "->", ds.keyCamelot);
       }
-      return;
     }
 
     // camelot string directly
@@ -224,7 +250,7 @@ export class StageLinqBridge {
       this.touch(deck);
       if (!this.seen.key) {
         this.seen.key = true;
-        console.log("[DISCOVER] key (string) from TrackData:", deck, ds.keyCamelot);
+        if (LOG_CONFIG.discover) console.log("[DISCOVER] key (string) from TrackData:", deck, ds.keyCamelot);
       }
     }
   }
@@ -242,7 +268,7 @@ export class StageLinqBridge {
 
     if (prev !== isPlaying) {
       this.lastPlay[deck] = isPlaying;
-      console.log(`[Playback] Deck ${deck}: ${isPlaying ? "START" : "STOP"}`);
+      if (LOG_CONFIG.playback) console.log(`[Playback] Deck ${deck}: ${isPlaying ? "START" : "STOP"}`);
     }
   }
 
@@ -252,23 +278,21 @@ export class StageLinqBridge {
     // Different versions use different lifecycle event names; listen to both.
     devices.on?.("ready", (info: any) => {
       const name = info?.software?.name || "";
-      console.log(`StageLinq ready ${name ? `(${name})` : ""}`);
+      if (LOG_CONFIG.lifecycle) console.log(`StageLinq ready ${name ? `(${name})` : ""}`);
     });
 
     devices.on?.("connected", (info: any) => {
-      console.log(
-        `StageLinq connected: ${info?.address || ""} ${info?.software?.name || ""}`
+      if (LOG_CONFIG.lifecycle) console.log(`StageLinq connected: ${info?.address || ""} ${info?.software?.name || ""}`
       );
     });
 
     devices.on?.("deviceConnected", (info: any) => {
-      console.log(
-        `StageLinq deviceConnected: ${info?.address || ""} ${info?.software?.name || ""}`
+      if (LOG_CONFIG.lifecycle) console.log(`StageLinq deviceConnected: ${info?.address || ""} ${info?.software?.name || ""}`
       );
     });
 
     devices.on?.("error", (e: any) => {
-      console.error("StageLinq error:", e?.message || e);
+      if (LOG_CONFIG.errors) console.error("StageLinq error:", e?.message || e);
     });
 
     /**
@@ -307,7 +331,7 @@ export class StageLinqBridge {
 
           if (!this.seen.fader) {
             this.seen.fader = true;
-            console.log("[DISCOVER] Fader path:", name, "=", rawValue);
+            if (LOG_CONFIG.discover) console.log("[DISCOVER] Fader path:", name, "=", rawValue);
           }
         }
         return;
@@ -324,6 +348,27 @@ export class StageLinqBridge {
       const tail = m[2];
       const ds = this.decks[deck];
 
+      if (/TrackNetworkPath$/i.test(tail) && typeof rawValue === "string") {
+        const path = rawValue.trim();
+
+        if (!path) {
+          this.unloadDeck(deck);
+          return;
+        }
+
+        const changed = this.trackNetworkPath[deck] !== path;
+
+        ds.trackLoaded = true;
+        this.trackNetworkPath[deck] = path;
+        this.touch(deck);
+
+        if (changed) {
+          ds.trackBpm = 0;
+          this.fetchTrackBpm(deck, path);
+          if (LOG_CONFIG.metadata) console.log("[TRACK PATH]", deck, path);
+        }
+      }
+
       // TrackData often contains duration + key info on Prime/Denon
       if (/(Track\/)?TrackData$/i.test(tail)) {
         this.tryParseTrackData(deck, json); // pass the whole json wrapper
@@ -333,7 +378,7 @@ export class StageLinqBridge {
 
       // --- discovery: print first *usable* key/length messages we ever see ---
       if (!this.seen.key && /key/i.test(tail)) {
-        console.log("[DISCOVER] KEY candidate:", name, "=", rawValue);
+        if (LOG_CONFIG.discover) console.log("[DISCOVER] KEY candidate:", name, "=", rawValue);
         // only lock once we actually got something usable
         if (typeof rawValue === "number" || (typeof rawValue === "string" && rawValue.trim())) {
           this.seen.key = true;
@@ -341,7 +386,7 @@ export class StageLinqBridge {
       }
 
       if (!this.seen.total && /(tracklength|length|duration)/i.test(tail)) {
-        console.log("[DISCOVER] LENGTH candidate:", name, "=", rawValue);
+        if (LOG_CONFIG.discover) console.log("[DISCOVER] LENGTH candidate:", name, "=", rawValue);
         if (typeof rawValue === "number") {
           this.seen.total = true;
         }
@@ -362,8 +407,7 @@ export class StageLinqBridge {
             this.touch(deck);
             if (!this.seen.total) {
               this.seen.total = true;
-              console.log(
-                "[DISCOVER] TotalSec from TrackLength(samples)/SampleRate:",
+              if (LOG_CONFIG.discover) console.log("[DISCOVER] TotalSec from TrackLength(samples)/SampleRate:",
                 name,
                 "samples=",
                 pendingSamples,
@@ -376,7 +420,7 @@ export class StageLinqBridge {
           }
 
           if (!this.seen.elapsed) {
-            console.log("[DISCOVER] SampleRate path:", name, "=", rawValue);
+            if (LOG_CONFIG.discover) console.log("[DISCOVER] SampleRate path:", name, "=", rawValue);
           }
         }
       }
@@ -404,7 +448,7 @@ export class StageLinqBridge {
 
         if (!this.seen.total) {
           this.seen.total = true;
-          console.log("[DISCOVER] TotalSec path:", name, "=", rawValue, isMs ? "(ms)" : "(s)");
+          if (LOG_CONFIG.discover) console.log("[DISCOVER] TotalSec path:", name, "=", rawValue, isMs ? "(ms)" : "(s)");
         }
       }
 
@@ -415,17 +459,7 @@ export class StageLinqBridge {
 
         if (!this.seen.key) {
           this.seen.key = true;
-          console.log("[DISCOVER] KeyIndex path:", name, "=", rawValue);
-        }
-      }
-
-      // ---- Original / analyzed track BPM ----
-      if (/(Track\/)?CurrentBPM$/i.test(tail) && /Track\//i.test(tail) && typeof rawValue === "number") {
-        ds.trackBpm = rawValue;
-        this.touch(deck);
-
-        if (!Number.isFinite(ds.currentBpm) || ds.currentBpm <= 0) {
-          ds.currentBpm = rawValue;
+          if (LOG_CONFIG.discover) console.log("[DISCOVER] KeyIndex path:", name, "=", rawValue);
         }
       }
 
@@ -436,7 +470,7 @@ export class StageLinqBridge {
 
         if (!this.seen.key) {
           this.seen.key = true;
-          console.log("[DISCOVER] Key (string) path:", name, "=", rawValue);
+          if (LOG_CONFIG.discover) console.log("[DISCOVER] Key (string) path:", name, "=", rawValue);
         }
       }
 
@@ -451,7 +485,7 @@ export class StageLinqBridge {
         this.touch(deck);
         if (!this.seen.speed) {
           this.seen.speed = true;
-          console.log("[DISCOVER] Speed path:", name, "=", rawValue);
+          if (LOG_CONFIG.discover) console.log("[DISCOVER] Speed path:", name, "=", rawValue);
         }
       }
 
@@ -462,7 +496,7 @@ export class StageLinqBridge {
         this.touch(deck);
         if (!this.seen.speed) {
           this.seen.speed = true;
-          console.log("[DISCOVER] SpeedNeutral path:", name, "=", rawValue);
+          if (LOG_CONFIG.discover) console.log("[DISCOVER] SpeedNeutral path:", name, "=", rawValue);
         }
       }
 
@@ -472,7 +506,7 @@ export class StageLinqBridge {
         this.touch(deck);
         if (!this.seen.fader) {
           this.seen.fader = true;
-          console.log("[DISCOVER] Fader (deck) path:", name, "=", rawValue);
+          if (LOG_CONFIG.discover) console.log("[DISCOVER] Fader (deck) path:", name, "=", rawValue);
         }
       }
 
@@ -557,9 +591,6 @@ export class StageLinqBridge {
       if (typeof status?.keyIndex === "number") ds.keyIndex = status.keyIndex;
 
 
-      if (typeof status?.currentBpm === "number") {
-        ds.currentBpm = status.currentBpm;
-      }
       if (typeof status?.externalMixerVolume === "number") {
         ds.fader = clamp01(status.externalMixerVolume);
       }
@@ -599,8 +630,7 @@ export class StageLinqBridge {
 
               if (!this.seen.elapsed) {
                 this.seen.elapsed = true;
-                console.log(
-                  "[DISCOVER] ElapsedSec from BeatInfo samples:",
+                if (LOG_CONFIG.discover) console.log("[DISCOVER] ElapsedSec from BeatInfo samples:",
                   deck,
                   "samples=",
                   payload.samples,
@@ -650,8 +680,7 @@ export class StageLinqBridge {
 
                 if (!this.seen.elapsed) {
                   this.seen.elapsed = true;
-                  console.log(
-                    "[DISCOVER] ElapsedSec from BeatInfo decks[].samples:",
+                  if (LOG_CONFIG.discover) console.log("[DISCOVER] ElapsedSec from BeatInfo decks[].samples:",
                     deck,
                     "samples=",
                     d.samples,
@@ -688,18 +717,12 @@ export class StageLinqBridge {
 
       if (tail === "TrackLength" || tail === "Track/TrackLength") {
         if (typeof value === "number") ds.totalSec = Math.max(0, value);
-      } else if (tail === "CurrentBPM") {
-        if (typeof value === "number") {
-          ds.currentBpm = value;
-        }
-      } else if (tail === "Track/CurrentBPM") {
-        if (typeof value === "number") {
-          ds.trackBpm = value;
-        }
       } else if (tail === "Speed" || tail === "Track/Speed") {
-        if (typeof value === "number") ds.speed = value;
+        if (typeof value === "number") this.speedRaw[deck] = value;
       } else if (tail === "ExternalMixerVolume" || tail === "Track/ExternalMixerVolume") {
         if (typeof value === "number") ds.fader = clamp01(value);
+      } else if (tail === "SpeedNeutral") {
+        if (typeof value === "number") this.speedNeutralRaw[deck] = value;
       } else if (tail === "ArtistName" || tail === "Track/ArtistName") {
         if (typeof value === "string") {
           if (value.trim()) { ds.artist = value; ds.trackLoaded = true; }
