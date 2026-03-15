@@ -12,7 +12,7 @@ const blankDeck = (deck: DeckNumber): DeckState => ({
   totalSec: 0,
   currentBpm: 0,
   trackBpm: 0,
-  speed: 1,
+  speedState: 0,
   keyIndex: null,
   keyCamelot: '--',
   fader: 0,
@@ -75,7 +75,7 @@ export default function App() {
     return () => {
       closedByUs = true;
       if (retryT) window.clearTimeout(retryT);
-      try { ws?.close(); } catch {}
+      try { ws?.close(); } catch { }
     };
   }, [wsUrl]);
 

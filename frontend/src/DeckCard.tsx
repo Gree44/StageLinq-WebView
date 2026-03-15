@@ -13,11 +13,10 @@ function formatMMSS(seconds: number): string {
   return `${pad2(m)}:${pad2(r)}`;
 }
 
-function signedPercent(speed: number): string {
-  if (!Number.isFinite(speed) || speed <= 0) return '0.0%';
-  const pct = (speed - 1) * 100;
-  const sign = pct >= 0 ? '+' : '';
-  return `${sign}${pct.toFixed(1)}%`;
+function signedPercentFromSpeedState(speedState: number): string {
+  if (!Number.isFinite(speedState)) return '0.00%';
+  const sign = speedState >= 0 ? '+' : '';
+  return `${sign}${speedState.toFixed(2)}%`;
 }
 
 export default function DeckCard(props: {
@@ -36,7 +35,7 @@ export default function DeckCard(props: {
 
   const bpm = Number.isFinite(state.currentBpm) ? state.currentBpm.toFixed(2) : '—';
   const trackBpm = Number.isFinite(state.trackBpm) && state.trackBpm > 0 ? state.trackBpm.toFixed(2) : '—';
-  const rel = signedPercent(state.speed);
+  const rel = signedPercentFromSpeedState(state.speedState);
 
   const faderPct = Math.round((state.fader ?? 0) * 100);
 

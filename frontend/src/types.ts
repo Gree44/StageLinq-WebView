@@ -8,7 +8,7 @@ export interface DeckState {
   totalSec: number;
   currentBpm: number;
   trackBpm: number;
-  speed: number;
+  speedState: number;
   keyIndex: number | null;
   keyCamelot: string;
   fader: number;

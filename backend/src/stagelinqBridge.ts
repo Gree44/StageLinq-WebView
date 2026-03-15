@@ -1,5 +1,6 @@
 import type { DeckNumber, DeckState } from "./types.js";
 import { keyIndexToCamelot } from "./camelot.js";
+import { logBpmDebug, logDiscover, logDiscoverSpeed, logError, logLifecycle, logPlayback } from "./logging.js";
 
 import * as pkg from "@gree44/stagelinq";
 
@@ -12,6 +13,11 @@ const DECKS: DeckNumber[] = [1, 2, 3, 4];
 function clamp01(x: number): number {
   if (!Number.isFinite(x)) return 0;
   return Math.max(0, Math.min(1, x));
+}
+
+function roundToDigits(x: number, digits: number): number {
+  const p = 10 ** digits;
+  return Math.round(x * p) / p;
 }
 
 export interface BridgeOptions {
@@ -46,12 +52,19 @@ export class StageLinqBridge {
     4: null,
   };
 
-  // Raw speed values as published by StageLinq.
-  // On some devices /Engine/DeckX/Speed is *not* a direct ratio where 1.0 == neutral.
-  // Instead, neutral is whatever /Engine/DeckX/SpeedNeutral reports.
-  // We normalize to a real ratio: ratio = speedRaw / speedNeutralRaw.
-  private speedRaw: Record<DeckNumber, number | null> = { 1: null, 2: null, 3: null, 4: null };
-  private speedNeutralRaw: Record<DeckNumber, number | null> = { 1: null, 2: null, 3: null, 4: null };
+  // Normalized speed controls from StageLinq.
+  // SpeedState is effective pitch offset in percent.
+  // Raw CurrentBPM sourced strictly from /Engine/DeckX/CurrentBPM updates.
+  private currentBpmRaw: Record<DeckNumber, number | null> = { 1: null, 2: null, 3: null, 4: null };
+  private speedStateRaw: Record<DeckNumber, number | string | boolean | null> = { 1: null, 2: null, 3: null, 4: null };
+
+  // Avoid repeated [DISCOVER] speed logs when values haven't changed.
+  private lastSpeedDiscoverSig: Record<DeckNumber, string | null> = {
+    1: null,
+    2: null,
+    3: null,
+    4: null,
+  };
 
   // TrackLength is sometimes published in *samples* (not seconds).
   // If we see a "too large" number, we keep it here until we have SampleRate.
@@ -79,7 +92,7 @@ export class StageLinqBridge {
       currentBpm: 0,
 
       trackBpm: 0,
-      speed: 1,
+      speedState: 0,
       keyIndex: null,
       keyCamelot: "--",
       fader: 0,
@@ -92,28 +105,69 @@ export class StageLinqBridge {
     this.decks[deck].updatedAt = Date.now();
   }
 
+  private emitBpmDebug(deck: DeckNumber, source: string) {
+    const ds = this.decks[deck];
+    const speedStateRaw = this.speedStateRaw[deck];
+    const speedState =
+      typeof speedStateRaw === "number" && Number.isFinite(speedStateRaw)
+        ? roundToDigits(speedStateRaw, 5)
+        : speedStateRaw;
+
+    logBpmDebug(
+      deck,
+      `[BPM DEBUG] Deck ${deck} source=${source} currentBpm=${ds.currentBpm} baseBpm=${ds.trackBpm} speedState=${speedState ?? "n/a"}`
+    );
+  }
+
   private recomputeDerived(deck: DeckNumber) {
     const ds = this.decks[deck];
+    const bpmRaw = this.currentBpmRaw[deck];
+    const bpmForCalc = Number.isFinite(bpmRaw) ? (bpmRaw as number) : ds.currentBpm;
     ds.keyCamelot = keyIndexToCamelot(ds.keyIndex);
 
     if (!this.seen.key && ds.keyIndex != null) {
       this.seen.key = true;
-      console.log("[DISCOVER] KeyIndex value:", ds.keyIndex, "->", ds.keyCamelot);
+      logDiscover(deck, "[DISCOVER] KeyIndex value:", ds.keyIndex, "->", ds.keyCamelot);
     }
 
-    // Normalize raw speed to a real ratio when possible.
-    // If SpeedNeutral is present, use ratio = raw / neutral.
-    // Otherwise assume ds.speed already is a ratio.
-    const raw = this.speedRaw[deck];
-    const neutral = this.speedNeutralRaw[deck];
+    const speedState = this.speedStateRaw[deck];
 
-    if (Number.isFinite(raw) && Number.isFinite(neutral) && (neutral as number) > 0) {
-      ds.speed = (raw as number) / (neutral as number);
+    let ratio: number | null = null;
+    let relativePercent: number | null = null;
+    let source: "speedState" | "none" = "none";
+
+    // Preferred: SpeedState is effective pitch offset in percent.
+    if (typeof speedState === "number" && Number.isFinite(speedState)) {
+      ds.speedState = speedState;
+      const candidateRatio = 1 + speedState / 100;
+      if (Number.isFinite(candidateRatio) && candidateRatio > 0.000001) {
+        ratio = candidateRatio;
+        relativePercent = speedState;
+        source = "speedState";
+      }
+    } else {
+      ds.speedState = 0;
     }
 
-    // Track BPM derived from current BPM and speed ratio (ratio ~ 1.0).
-    if (Number.isFinite(ds.speed) && ds.speed > 0.0001 && Number.isFinite(ds.currentBpm)) {
-      ds.trackBpm = ds.currentBpm / ds.speed;
+    if (ratio != null) {
+      const neutralTrackBpm =
+        Number.isFinite(bpmForCalc) && ratio > 0.0001
+          ? bpmForCalc / ratio
+          : null;
+
+      const sig = `${source}|${relativePercent ?? "na"}|${ratio}|${bpmForCalc}|${neutralTrackBpm ?? "na"}`;
+      if (this.lastSpeedDiscoverSig[deck] !== sig) {
+        this.lastSpeedDiscoverSig[deck] = sig;
+        logDiscoverSpeed(
+          deck,
+          `[DISCOVER] Speed values deck ${deck}: source=${source}, relativePercent=${relativePercent != null ? relativePercent.toFixed(3) : "n/a"}%, ratio=${ratio.toFixed(6)}, currentBpm=${Number.isFinite(bpmForCalc) ? bpmForCalc : "n/a"}, baseBpm=${neutralTrackBpm != null ? neutralTrackBpm : "n/a"}`
+        );
+      }
+    }
+
+    // Track BPM (base BPM) derived only from SpeedState ratio.
+    if (ratio != null && Number.isFinite(bpmForCalc) && ratio > 0.0001) {
+      ds.trackBpm = bpmForCalc / ratio;
     } else {
       ds.trackBpm = 0;
     }
@@ -167,14 +221,14 @@ export class StageLinqBridge {
       this.touch(deck);
       if (!this.seen.total) {
         this.seen.total = true;
-        console.log("[DISCOVER] totalSec from TrackData (ms):", deck, ds.totalSec);
+        logDiscover(deck, "[DISCOVER] totalSec from TrackData (ms):", deck, ds.totalSec);
       }
     } else if (typeof durSec === "number" && durSec > 0) {
       ds.totalSec = durSec;
       this.touch(deck);
       if (!this.seen.total) {
         this.seen.total = true;
-        console.log("[DISCOVER] totalSec from TrackData (s):", deck, ds.totalSec);
+        logDiscover(deck, "[DISCOVER] totalSec from TrackData (s):", deck, ds.totalSec);
       }
     }
 
@@ -190,7 +244,7 @@ export class StageLinqBridge {
       this.touch(deck);
       if (!this.seen.key) {
         this.seen.key = true;
-        console.log("[DISCOVER] keyIndex from TrackData:", deck, keyIdx, "->", ds.keyCamelot);
+        logDiscover(deck, "[DISCOVER] keyIndex from TrackData:", deck, keyIdx, "->", ds.keyCamelot);
       }
       return;
     }
@@ -205,7 +259,7 @@ export class StageLinqBridge {
       this.touch(deck);
       if (!this.seen.key) {
         this.seen.key = true;
-        console.log("[DISCOVER] key (string) from TrackData:", deck, ds.keyCamelot);
+        logDiscover(deck, "[DISCOVER] key (string) from TrackData:", deck, ds.keyCamelot);
       }
     }
   }
@@ -223,7 +277,7 @@ export class StageLinqBridge {
 
     if (prev !== isPlaying) {
       this.lastPlay[deck] = isPlaying;
-      console.log(`[Playback] Deck ${deck}: ${isPlaying ? "START" : "STOP"}`);
+      logPlayback(deck, `[Playback] Deck ${deck}: ${isPlaying ? "START" : "STOP"}`);
     }
   }
 
@@ -233,23 +287,23 @@ export class StageLinqBridge {
     // Different versions use different lifecycle event names; listen to both.
     devices.on?.("ready", (info: any) => {
       const name = info?.software?.name || "";
-      console.log(`StageLinq ready ${name ? `(${name})` : ""}`);
+      logLifecycle(`StageLinq ready ${name ? `(${name})` : ""}`);
     });
 
     devices.on?.("connected", (info: any) => {
-      console.log(
+      logLifecycle(
         `StageLinq connected: ${info?.address || ""} ${info?.software?.name || ""}`
       );
     });
 
     devices.on?.("deviceConnected", (info: any) => {
-      console.log(
+      logLifecycle(
         `StageLinq deviceConnected: ${info?.address || ""} ${info?.software?.name || ""}`
       );
     });
 
     devices.on?.("error", (e: any) => {
-      console.error("StageLinq error:", e?.message || e);
+      logError("StageLinq error:", e?.message || e);
     });
 
     /**
@@ -288,7 +342,7 @@ export class StageLinqBridge {
 
           if (!this.seen.fader) {
             this.seen.fader = true;
-            console.log("[DISCOVER] Fader path:", name, "=", rawValue);
+            logDiscover(ch, "[DISCOVER] Fader path:", name, "=", rawValue);
           }
         }
         return;
@@ -314,7 +368,7 @@ export class StageLinqBridge {
 
       // --- discovery: print first *usable* key/length messages we ever see ---
       if (!this.seen.key && /key/i.test(tail)) {
-        console.log("[DISCOVER] KEY candidate:", name, "=", rawValue);
+        logDiscover(deck, "[DISCOVER] KEY candidate:", name, "=", rawValue);
         // only lock once we actually got something usable
         if (typeof rawValue === "number" || (typeof rawValue === "string" && rawValue.trim())) {
           this.seen.key = true;
@@ -322,7 +376,7 @@ export class StageLinqBridge {
       }
 
       if (!this.seen.total && /(tracklength|length|duration)/i.test(tail)) {
-        console.log("[DISCOVER] LENGTH candidate:", name, "=", rawValue);
+        logDiscover(deck, "[DISCOVER] LENGTH candidate:", name, "=", rawValue);
         if (typeof rawValue === "number") {
           this.seen.total = true;
         }
@@ -343,7 +397,8 @@ export class StageLinqBridge {
             this.touch(deck);
             if (!this.seen.total) {
               this.seen.total = true;
-              console.log(
+              logDiscover(
+                deck,
                 "[DISCOVER] TotalSec from TrackLength(samples)/SampleRate:",
                 name,
                 "samples=",
@@ -357,7 +412,7 @@ export class StageLinqBridge {
           }
 
           if (!this.seen.elapsed) {
-            console.log("[DISCOVER] SampleRate path:", name, "=", rawValue);
+            logDiscover(deck, "[DISCOVER] SampleRate path:", name, "=", rawValue);
           }
         }
       }
@@ -385,7 +440,7 @@ export class StageLinqBridge {
 
         if (!this.seen.total) {
           this.seen.total = true;
-          console.log("[DISCOVER] TotalSec path:", name, "=", rawValue, isMs ? "(ms)" : "(s)");
+          logDiscover(deck, "[DISCOVER] TotalSec path:", name, "=", rawValue, isMs ? "(ms)" : "(s)");
         }
       }
 
@@ -396,7 +451,7 @@ export class StageLinqBridge {
 
         if (!this.seen.key) {
           this.seen.key = true;
-          console.log("[DISCOVER] KeyIndex path:", name, "=", rawValue);
+          logDiscover(deck, "[DISCOVER] KeyIndex path:", name, "=", rawValue);
         }
       }
 
@@ -407,33 +462,36 @@ export class StageLinqBridge {
 
         if (!this.seen.key) {
           this.seen.key = true;
-          console.log("[DISCOVER] Key (string) path:", name, "=", rawValue);
+          logDiscover(deck, "[DISCOVER] Key (string) path:", name, "=", rawValue);
         }
       }
 
 
 
-      // ---- Speed (pitch ratio) ----
-      if ((/Speed$/i.test(tail) || /Track\/Speed$/i.test(tail)) && typeof rawValue === "number") {
-        this.speedRaw[deck] = rawValue;
-        // Default to raw until we also have SpeedNeutral.
-        ds.speed = rawValue;
-        this.recomputeDerived(deck);
-        this.touch(deck);
-        if (!this.seen.speed) {
-          this.seen.speed = true;
-          console.log("[DISCOVER] Speed path:", name, "=", rawValue);
+      // ---- Core BPM/speed controls from /Engine/DeckX/... ----
+      if (tail === "CurrentBPM" && typeof rawValue === "number") {
+        ds.currentBpm = rawValue;
+        this.currentBpmRaw[deck] = rawValue;
+      }
+
+      if (tail === "SpeedState") {
+        if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+          this.speedStateRaw[deck] = roundToDigits(rawValue, 5);
+        } else {
+          this.speedStateRaw[deck] = rawValue as number | string | boolean;
         }
       }
 
-      // ---- SpeedNeutral (used to normalize Speed -> ratio) ----
-      if (/SpeedNeutral$/i.test(tail) && typeof rawValue === "number") {
-        this.speedNeutralRaw[deck] = rawValue;
+      if (
+        tail === "CurrentBPM" ||
+        tail === "SpeedState"
+      ) {
         this.recomputeDerived(deck);
         this.touch(deck);
+        this.emitBpmDebug(deck, `message.${tail}`);
         if (!this.seen.speed) {
           this.seen.speed = true;
-          console.log("[DISCOVER] SpeedNeutral path:", name, "=", rawValue);
+          logDiscoverSpeed(deck, "[DISCOVER] BPM/Speed control path:", name, "=", rawValue);
         }
       }
 
@@ -443,7 +501,7 @@ export class StageLinqBridge {
         this.touch(deck);
         if (!this.seen.fader) {
           this.seen.fader = true;
-          console.log("[DISCOVER] Fader (deck) path:", name, "=", rawValue);
+          logDiscover(deck, "[DISCOVER] Fader (deck) path:", name, "=", rawValue);
         }
       }
 
@@ -496,7 +554,9 @@ export class StageLinqBridge {
       if (typeof status?.keyIndex === "number") ds.keyIndex = status.keyIndex;
 
 
-      if (typeof status?.currentBpm === "number") ds.currentBpm = status.currentBpm;
+      if (typeof status?.currentBpm === "number") {
+        ds.currentBpm = status.currentBpm;
+      }
       if (typeof status?.externalMixerVolume === "number") {
         ds.fader = clamp01(status.externalMixerVolume);
       }
@@ -536,7 +596,8 @@ export class StageLinqBridge {
 
               if (!this.seen.elapsed) {
                 this.seen.elapsed = true;
-                console.log(
+                logDiscover(
+                  deck,
                   "[DISCOVER] ElapsedSec from BeatInfo samples:",
                   deck,
                   "samples=",
@@ -553,7 +614,9 @@ export class StageLinqBridge {
 
 
 
-        if (typeof payload.bpm === "number") ds.currentBpm = payload.bpm;
+        if (typeof payload.bpm === "number") {
+          ds.currentBpm = payload.bpm;
+        }
 
         this.recomputeDerived(deck);
         this.touch(deck);
@@ -568,7 +631,9 @@ export class StageLinqBridge {
           if (!DECKS.includes(deck)) return;
 
           const ds = this.decks[deck];
-          if (typeof d?.bpm === "number") ds.currentBpm = d.bpm;
+          if (typeof d?.bpm === "number") {
+            ds.currentBpm = d.bpm;
+          }
 
           // Prefer samples + sampleRate (ArtNet-style) if available
           if (typeof d?.samples === "number") {
@@ -583,7 +648,8 @@ export class StageLinqBridge {
 
                 if (!this.seen.elapsed) {
                   this.seen.elapsed = true;
-                  console.log(
+                  logDiscover(
+                    deck,
                     "[DISCOVER] ElapsedSec from BeatInfo decks[].samples:",
                     deck,
                     "samples=",
@@ -606,7 +672,7 @@ export class StageLinqBridge {
       }
     });
 
-    // State map updates include TrackLength, Speed, CurrentKeyIndex, ExternalMixerVolume, etc.
+    // State map updates include TrackLength, current BPM/speed controls, key, fader, etc.
     devices.on?.("stateChanged", (state: any) => {
       const name = String(state?.name || "");
       const m = name.match(/^\/Engine\/Deck([1-4])\/(.*)$/);
@@ -618,14 +684,27 @@ export class StageLinqBridge {
       const tail = m[2];
       const value = state?.value;
       const ds = this.decks[deck];
+      let bpmSpeedSourceUpdated = false;
 
       if (tail === "TrackLength" || tail === "Track/TrackLength") {
         if (typeof value === "number") ds.totalSec = Math.max(0, value);
-      } else if (tail === "CurrentBPM" || tail === "Track/CurrentBPM") {
-        if (typeof value === "number") ds.currentBpm = value;
-      } else if (tail === "Speed" || tail === "Track/Speed") {
-        if (typeof value === "number") ds.speed = value;
-      } else if (tail === "ExternalMixerVolume" || tail === "Track/ExternalMixerVolume") {
+      } else if (tail === "CurrentBPM") {
+        if (typeof value === "number") {
+          ds.currentBpm = value;
+          this.currentBpmRaw[deck] = value;
+          bpmSpeedSourceUpdated = true;
+        }
+      } else if (tail === "SpeedState") {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          this.speedStateRaw[deck] = roundToDigits(value, 5);
+        } else {
+          this.speedStateRaw[deck] = value as number | string | boolean;
+        }
+        bpmSpeedSourceUpdated = true;
+      }
+
+
+      else if (tail === "ExternalMixerVolume" || tail === "Track/ExternalMixerVolume") {
         if (typeof value === "number") ds.fader = clamp01(value);
       } else if (tail === "ArtistName" || tail === "Track/ArtistName") {
         if (typeof value === "string" && value.trim()) ds.artist = value;
@@ -644,6 +723,10 @@ export class StageLinqBridge {
 
       this.recomputeDerived(deck);
       this.touch(deck);
+
+      if (bpmSpeedSourceUpdated) {
+        this.emitBpmDebug(deck, `stateChanged.${tail}`);
+      }
     });
   }
 

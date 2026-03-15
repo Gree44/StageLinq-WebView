@@ -7,8 +7,8 @@ export interface DeckState {
   elapsedSec: number; // BeatInfo timeline (seconds)
   totalSec: number;   // TrackLength (seconds)
   currentBpm: number;
-  trackBpm: number;   // derived (currentBpm / speed) when possible
-  speed: number;      // 1.0 = normal
+  trackBpm: number;   // derived base BPM from currentBpm and SpeedState when available
+  speedState: number; // relative pitch percent (e.g. +1.52)
   keyIndex: number | null;
   keyCamelot: string; // derived display string
   fader: number;      // 0..1 (ExternalMixerVolume)

@@ -8,6 +8,7 @@ import { StageLinqBridge } from './stagelinqBridge.js';
 import type { DeckNumber, SnapshotPayload, WsPayload } from './types.js';
 import { ArtNetTimecodeBroadcaster } from './artnetTimecode.js';
 import { States, StageLinqValue } from "@gree44/stagelinq";
+import { logError, logLifecycle, logUiOut } from './logging.js';
 
 function ensureState(state: StageLinqValue) {
   if (!States.includes(state)) States.push(state);
@@ -77,12 +78,12 @@ async function main() {
   // Connect StageLinq with basic retry loop
   while (true) {
     try {
-      console.log('Connecting to StageLinq…');
+      logLifecycle('Connecting to StageLinq...');
       await bridge.connect();
-      console.log('StageLinq connected.');
+      logLifecycle('StageLinq connected.');
       break;
     } catch (e: any) {
-      console.error('StageLinq connect failed:', e?.message || e);
+      logError('StageLinq connect failed:', e?.message || e);
       await new Promise((r) => setTimeout(r, 2000));
     }
   }
@@ -146,7 +147,7 @@ async function main() {
     const comparableStr = JSON.stringify(makeComparableSnapshot(payload));
     if (comparableStr !== lastComparable) {
       lastComparable = comparableStr;
-      console.log('[UI OUT]', JSON.stringify(payload));
+      logUiOut('[UI OUT]', JSON.stringify(payload));
     }
 
     const msg = JSON.stringify(payload as WsPayload);
@@ -158,12 +159,12 @@ async function main() {
 
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Web UI: http://0.0.0.0:${PORT}/`);
-    console.log(`WS: ws://0.0.0.0:${PORT}/ws`);
+    logLifecycle(`Web UI: http://0.0.0.0:${PORT}/`);
+    logLifecycle(`WS: ws://0.0.0.0:${PORT}/ws`);
   });
 }
 
 main().catch((e) => {
-  console.error('Fatal:', e?.message || e);
+  logError('Fatal:', e?.message || e);
   process.exit(1);
 });
