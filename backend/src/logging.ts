@@ -3,8 +3,8 @@ export const LOG_ENABLED = {
     lifecycle: true,
     playback: true,
     discover: true,
-    discoverSpeed: true,
-    bpmDebug: true,
+    discoverSpeed: false,
+    bpmDebug: false,
     uiOut: false,
     errors: true,
 };
