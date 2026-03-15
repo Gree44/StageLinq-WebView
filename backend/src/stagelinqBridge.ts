@@ -84,6 +84,7 @@ export class StageLinqBridge {
   private blankDeck(deck: DeckNumber): DeckState {
     return {
       deck,
+      trackLoaded: false,
       title: "—",
       artist: "—",
       elapsedSec: 0,
@@ -103,6 +104,9 @@ export class StageLinqBridge {
 
   private touch(deck: DeckNumber) {
     this.decks[deck].updatedAt = Date.now();
+  }
+  private unloadDeck(deck: DeckNumber) {
+    this.decks[deck].trackLoaded = false;
   }
 
   private emitBpmDebug(deck: DeckNumber, source: string) {
@@ -359,6 +363,19 @@ export class StageLinqBridge {
       const tail = m[2];
       const ds = this.decks[deck];
 
+      // ---- Explicit track-loaded flag (if emitted by device) ----
+      if (/TrackIsLoaded$/i.test(tail) || /IsLoaded$/i.test(tail)) {
+        const loaded = this.coerceBool(rawValue);
+        if (typeof loaded === "boolean") {
+          if (!loaded) {
+            this.unloadDeck(deck);
+          } else {
+            ds.trackLoaded = true;
+          }
+          this.touch(deck);
+        }
+      }
+
       // TrackData often contains duration + key info on Prime/Denon
       if (/(Track\/)?TrackData$/i.test(tail)) {
         this.tryParseTrackData(deck, json); // pass the whole json wrapper
@@ -508,10 +525,18 @@ export class StageLinqBridge {
       // ---- Track title / artist (keep your exact matches, plus fallback patterns) ----
       if ((/SongName$/i.test(tail) || /Title$/i.test(tail)) && typeof rawValue === "string" && rawValue.trim()) {
         ds.title = rawValue;
+        ds.trackLoaded = true;
+        this.touch(deck);
+      } else if ((/SongName$/i.test(tail) || /Title$/i.test(tail)) && typeof rawValue === "string" && !rawValue.trim()) {
+        this.unloadDeck(deck);
         this.touch(deck);
       }
       if ((/ArtistName$/i.test(tail) || /Artist$/i.test(tail)) && typeof rawValue === "string" && rawValue.trim()) {
         ds.artist = rawValue;
+        ds.trackLoaded = true;
+        this.touch(deck);
+      } else if ((/ArtistName$/i.test(tail) || /Artist$/i.test(tail)) && typeof rawValue === "string" && !rawValue.trim()) {
+        this.unloadDeck(deck);
         this.touch(deck);
       }
 
@@ -546,8 +571,22 @@ export class StageLinqBridge {
 
 
       const ds = this.decks[deck];
-      ds.title = status?.title || ds.title || "—";
-      ds.artist = status?.artist || ds.artist || "—";
+      if (typeof status?.title === "string") {
+        if (status.title.trim()) {
+          ds.title = status.title;
+          ds.trackLoaded = true;
+        } else {
+          this.unloadDeck(deck);
+        }
+      }
+      if (typeof status?.artist === "string") {
+        if (status.artist.trim()) {
+          ds.artist = status.artist;
+          ds.trackLoaded = true;
+        } else {
+          this.unloadDeck(deck);
+        }
+      }
 
       // Some builds include key info in nowPlaying
       if (typeof status?.currentKeyIndex === "number") ds.keyIndex = status.currentKeyIndex;
@@ -707,9 +746,23 @@ export class StageLinqBridge {
       else if (tail === "ExternalMixerVolume" || tail === "Track/ExternalMixerVolume") {
         if (typeof value === "number") ds.fader = clamp01(value);
       } else if (tail === "ArtistName" || tail === "Track/ArtistName") {
-        if (typeof value === "string" && value.trim()) ds.artist = value;
+        if (typeof value === "string") {
+          if (value.trim()) {
+            ds.artist = value;
+            ds.trackLoaded = true;
+          } else {
+            this.unloadDeck(deck);
+          }
+        }
       } else if (tail === "SongName" || tail === "Track/SongName") {
-        if (typeof value === "string" && value.trim()) ds.title = value;
+        if (typeof value === "string") {
+          if (value.trim()) {
+            ds.title = value;
+            ds.trackLoaded = true;
+          } else {
+            this.unloadDeck(deck);
+          }
+        }
       } else if (tail === "CurrentKeyIndex" || tail === "Track/CurrentKeyIndex") {
         if (typeof value === "number") ds.keyIndex = value;
       } else if (tail === "Play" || tail === "PlayState") {

@@ -6,6 +6,7 @@ const DECKS: DeckNumber[] = [1, 2, 3, 4];
 
 const blankDeck = (deck: DeckNumber): DeckState => ({
   deck,
+  trackLoaded: false,
   title: '—',
   artist: '—',
   elapsedSec: 0,

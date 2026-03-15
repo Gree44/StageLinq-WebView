@@ -12,7 +12,7 @@ export const LOG_ENABLED = {
 // Deck filter for deck-scoped logs (discover/playback/speed).
 // Set enabled=true and toggle deck booleans to restrict output.
 export const LOG_DECK_FILTER = {
-    enabled: true,
+    enabled: false,
     deck1: false,
     deck2: true,
     deck3: false,
