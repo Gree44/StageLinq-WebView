@@ -1,6 +1,7 @@
 {
   "name": "dj-decks-visualizer",
   "private": true,
+  "license": "MIT",
   "workspaces": [
     "backend",
     "frontend"
