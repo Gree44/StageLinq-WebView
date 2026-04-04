@@ -82,28 +82,35 @@ export class ArtNetTimecodeBroadcaster {
     const sourceSec = Number(deckState.elapsedSec) || 0;
     const sourceFrames = Math.max(0, sourceSec * this.opts.fps);
 
+    if (!deckState.play) {
+      // Keep internal clock in sync but suppress output when paused/stopped.
+      this.timelineFrames = sourceFrames;
+      this.lastTickMs = null;
+      return;
+    }
+
     if (this.timelineFrames == null) {
       this.timelineFrames = sourceFrames;
     }
 
-    if (deckState.play) {
-      if (this.lastTickMs != null) {
-        const dtSec = Math.max(0, (nowMs - this.lastTickMs) / 1000);
-        this.timelineFrames += dtSec * this.opts.fps;
-      }
+    // Warm-up tick: avoid emitting a single packet right when sender starts/resumes.
+    if (this.lastTickMs == null) {
+      this.lastTickMs = nowMs;
+      this.timelineFrames = sourceFrames;
+      return;
+    }
 
-      // Re-sync on seeks/jumps to keep sender aligned with deck timeline.
-      const drift = Math.abs(sourceFrames - this.timelineFrames);
-      if (drift > this.opts.fps * 0.15) {
-        this.timelineFrames = sourceFrames;
-      }
+    const dtSec = Math.max(0, (nowMs - this.lastTickMs) / 1000);
+    this.timelineFrames += dtSec * this.opts.fps;
 
-      // Never trail behind the source while playing.
-      if (this.timelineFrames < sourceFrames) {
-        this.timelineFrames = sourceFrames;
-      }
-    } else {
-      // Hold exact deck frame when paused/stopped.
+    // Re-sync on seeks/jumps to keep sender aligned with deck timeline.
+    const drift = Math.abs(sourceFrames - this.timelineFrames);
+    if (drift > this.opts.fps * 0.15) {
+      this.timelineFrames = sourceFrames;
+    }
+
+    // Never trail behind the source while playing.
+    if (this.timelineFrames < sourceFrames) {
       this.timelineFrames = sourceFrames;
     }
 

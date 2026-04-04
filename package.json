@@ -12,6 +12,7 @@
     "start": "npm run -w backend start"
   },
   "dependencies": {
-    "@gree44/stagelinq": "^3.0.9"
+    "@gree44/stagelinq": "^3.0.9",
+    "sacn": "4.6.2"
   }
 }
