@@ -6,8 +6,10 @@ export interface ArtNetOptions {
   targetIp: string;
   port: number;
   fps: number;
+  sendHz?: number;
   fpsType: number; // 0x00=24,0x01=25,0x02=29.97,0x03=30
   deck: 1 | 2 | 3 | 4;
+  latencyCompMs?: number;
 }
 
 function buildArtNetTimecode(hours: number, minutes: number, seconds: number, frames: number, fpsType: number): Buffer {
@@ -35,14 +37,16 @@ function framesToHMSF(totalFrames: number, fps: number) {
 
 export class ArtNetTimecodeBroadcaster {
   private socket = dgram.createSocket('udp4');
-  private lastFrame: number | null = null;
   private opts: ArtNetOptions;
+  private loop: NodeJS.Timeout | null = null;
+  private timelineFrames: number | null = null;
+  private lastTickMs: number | null = null;
 
   constructor(opts: ArtNetOptions) {
     this.opts = opts;
   }
 
-  async start() {
+  async start(getDeckState: () => DeckState | undefined) {
     if (!this.opts.enabled) return;
     await new Promise<void>((resolve) => {
       this.socket.bind(() => {
@@ -50,10 +54,23 @@ export class ArtNetTimecodeBroadcaster {
         resolve();
       });
     });
-    console.log(`Art-Net TC enabled: ${this.opts.targetIp}:${this.opts.port} @ ${this.opts.fps}fps (deck ${this.opts.deck})`);
+
+    const sendHz = Math.max(this.opts.fps, Number(this.opts.sendHz ?? this.opts.fps * 2));
+    const intervalMs = Math.max(1, Math.round(1000 / sendHz));
+    this.loop = setInterval(() => {
+      const deckState = getDeckState();
+      if (!deckState) return;
+      this.tick(deckState);
+    }, intervalMs);
+
+    console.log(`Art-Net TC enabled: ${this.opts.targetIp}:${this.opts.port} @ ${this.opts.fps}fps, send=${sendHz}Hz (deck ${this.opts.deck})`);
   }
 
   stop() {
+    if (this.loop) {
+      clearInterval(this.loop);
+      this.loop = null;
+    }
     try { this.socket.close(); } catch {}
   }
 
@@ -61,11 +78,48 @@ export class ArtNetTimecodeBroadcaster {
     if (!this.opts.enabled) return;
     if (deckState.deck !== this.opts.deck) return;
 
-    const seconds = Number(deckState.elapsedSec) || 0;
-    const totalFrames = Math.floor(seconds * this.opts.fps);
+    const nowMs = Date.now();
+    const sourceSec = Number(deckState.elapsedSec) || 0;
+    const sourceFrames = Math.max(0, sourceSec * this.opts.fps);
 
-    if (this.lastFrame === totalFrames) return;
-    this.lastFrame = totalFrames;
+    if (this.timelineFrames == null) {
+      this.timelineFrames = sourceFrames;
+    }
+
+    if (deckState.play) {
+      if (this.lastTickMs != null) {
+        const dtSec = Math.max(0, (nowMs - this.lastTickMs) / 1000);
+        this.timelineFrames += dtSec * this.opts.fps;
+      }
+
+      // Re-sync on seeks/jumps to keep sender aligned with deck timeline.
+      const drift = Math.abs(sourceFrames - this.timelineFrames);
+      if (drift > this.opts.fps * 0.15) {
+        this.timelineFrames = sourceFrames;
+      }
+
+      // Never trail behind the source while playing.
+      if (this.timelineFrames < sourceFrames) {
+        this.timelineFrames = sourceFrames;
+      }
+    } else {
+      // Hold exact deck frame when paused/stopped.
+      this.timelineFrames = sourceFrames;
+    }
+
+    this.lastTickMs = nowMs;
+
+    const latencyCompFrames = (this.opts.fps * (this.opts.latencyCompMs ?? 80)) / 1000;
+    let totalFrames = Math.max(0, Math.floor(this.timelineFrames + latencyCompFrames));
+
+    // Prevent running past track end (can trigger after-roll warnings on some desks).
+    const totalSec = Number(deckState.totalSec) || 0;
+    if (totalSec > 0) {
+      const maxFrame = Math.max(0, Math.floor(totalSec * this.opts.fps) - 1);
+      totalFrames = Math.min(totalFrames, maxFrame);
+    }
+
+    // Send every loop tick (no frame-skipping), so receivers get continuous TC updates.
 
     const tc = framesToHMSF(totalFrames, this.opts.fps);
     const pkt = buildArtNetTimecode(tc.hours, tc.minutes, tc.seconds, tc.frames, this.opts.fpsType);

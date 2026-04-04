@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { StageLinqBridge } from './stagelinqBridge.js';
-import type { DeckNumber, SnapshotPayload, WsPayload } from './types.js';
+import type { SnapshotPayload, WsPayload } from './types.js';
 import { ArtNetTimecodeBroadcaster } from './artnetTimecode.js';
 import { States, StageLinqValue } from "@gree44/stagelinq";
 import { logError, logLifecycle, logUiOut } from './logging.js';
@@ -39,11 +39,13 @@ const WS_FPS = 30;
 
 // Optional Art-Net timecode (kept for compatibility with your existing bridge)
 const ARTNET_ENABLED = (process.env.ARTNET_ENABLED ?? 'true').toLowerCase() !== 'false';
-const ARTNET_TARGET_IP = process.env.ARTNET_TARGET_IP ?? '255.255.255.255';
+const ARTNET_TARGET_IP = process.env.ARTNET_TARGET_IP ?? '10.15.10.117';
 const ARTNET_PORT = Number(process.env.ARTNET_PORT ?? 6454);
 const ARTNET_DECK = (Number(process.env.ARTNET_DECK ?? 1) as 1 | 2 | 3 | 4);
 const ARTNET_FPS = 30;
+const ARTNET_SEND_HZ = Number(process.env.ARTNET_SEND_HZ ?? ARTNET_FPS * 2);
 const ARTNET_FPS_TYPE = 0x03;
+const ARTNET_LATENCY_COMP_MS = Number(process.env.ARTNET_LATENCY_COMP_MS ?? 80);
 
 async function main() {
   const app = express();
@@ -71,8 +73,10 @@ async function main() {
     targetIp: ARTNET_TARGET_IP,
     port: ARTNET_PORT,
     fps: ARTNET_FPS,
+    sendHz: ARTNET_SEND_HZ,
     fpsType: ARTNET_FPS_TYPE,
     deck: ARTNET_DECK,
+    latencyCompMs: ARTNET_LATENCY_COMP_MS,
   });
 
   // Connect StageLinq with basic retry loop
@@ -88,7 +92,7 @@ async function main() {
     }
   }
 
-  await artnet.start();
+  await artnet.start(() => bridge.getDeck(ARTNET_DECK));
 
   let seq = 0;
   const clients = new Set<any>();
@@ -132,9 +136,6 @@ async function main() {
   const intervalMs = Math.round(1000 / WS_FPS);
   setInterval(() => {
     const decks = bridge.getDecks();
-
-    // feed Art-Net (selected deck)
-    artnet.tick(decks[ARTNET_DECK as DeckNumber]);
 
     const payload: SnapshotPayload = {
       type: 'snapshot',

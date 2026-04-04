@@ -797,4 +797,8 @@ export class StageLinqBridge {
     for (const d of DECKS) out[d] = { ...this.decks[d] };
     return out;
   }
+
+  getDeck(deck: DeckNumber): DeckState {
+    return { ...this.decks[deck] };
+  }
 }
