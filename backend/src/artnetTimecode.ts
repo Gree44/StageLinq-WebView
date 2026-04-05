@@ -10,6 +10,7 @@ export interface ArtNetOptions {
   fpsType: number; // 0x00=24,0x01=25,0x02=29.97,0x03=30
   deck: 1 | 2 | 3 | 4;
   latencyCompMs?: number;
+  sendWhenStopped?: boolean;
 }
 
 function buildArtNetTimecode(hours: number, minutes: number, seconds: number, frames: number, fpsType: number): Buffer {
@@ -41,9 +42,20 @@ export class ArtNetTimecodeBroadcaster {
   private loop: NodeJS.Timeout | null = null;
   private timelineFrames: number | null = null;
   private lastTickMs: number | null = null;
+  private sendWhenStopped: boolean;
+  private expectedIntervalMs = 0;
+  private fpsWindowStartMs: number | null = null;
+  private sentInWindow = 0;
+  private lastCadenceWarnMs = 0;
+  private lastSendAtMs: number | null = null;
 
   constructor(opts: ArtNetOptions) {
     this.opts = opts;
+    this.sendWhenStopped = opts.sendWhenStopped === true;
+  }
+
+  setSendWhenStopped(enabled: boolean) {
+    this.sendWhenStopped = enabled;
   }
 
   async start(getDeckState: () => DeckState | undefined) {
@@ -57,6 +69,7 @@ export class ArtNetTimecodeBroadcaster {
 
     const sendHz = Math.max(1, Number(this.opts.sendHz ?? this.opts.fps));
     const intervalMs = Math.max(1, Math.round(1000 / sendHz));
+    this.expectedIntervalMs = intervalMs;
     this.loop = setInterval(() => {
       const deckState = getDeckState();
       if (!deckState) return;
@@ -81,10 +94,13 @@ export class ArtNetTimecodeBroadcaster {
     const sourceSec = Number(deckState.elapsedSec) || 0;
     const sourceFrames = Math.max(0, sourceSec * this.opts.fps);
 
-    if (deckState.play !== true) {
+    if (!this.sendWhenStopped && deckState.play !== true) {
       // Keep internal clock in sync but suppress output when paused/stopped.
       this.timelineFrames = sourceFrames;
       this.lastTickMs = null;
+      this.fpsWindowStartMs = null;
+      this.sentInWindow = 0;
+      this.lastSendAtMs = null;
       return;
     }
 
@@ -130,5 +146,36 @@ export class ArtNetTimecodeBroadcaster {
     const tc = framesToHMSF(totalFrames, this.opts.fps);
     const pkt = buildArtNetTimecode(tc.hours, tc.minutes, tc.seconds, tc.frames, this.opts.fpsType);
     this.socket.send(pkt, 0, pkt.length, this.opts.port, this.opts.targetIp);
+
+    const sendNow = Date.now();
+    if (this.lastSendAtMs != null) {
+      const dtMs = sendNow - this.lastSendAtMs;
+      if (dtMs > this.expectedIntervalMs * 1.6 && (sendNow - this.lastCadenceWarnMs) > 1000) {
+        this.lastCadenceWarnMs = sendNow;
+        const instFps = 1000 / dtMs;
+        console.warn(
+          `[ArtNet] Cadence drop detected: ${instFps.toFixed(2)}fps (target ${this.opts.fps}fps, interval ${dtMs.toFixed(1)}ms)`
+        );
+      }
+    }
+    this.lastSendAtMs = sendNow;
+
+    if (this.fpsWindowStartMs == null) {
+      this.fpsWindowStartMs = sendNow;
+      this.sentInWindow = 0;
+    }
+    this.sentInWindow += 1;
+
+    const windowMs = sendNow - this.fpsWindowStartMs;
+    if (windowMs >= 1000) {
+      const avgFps = (this.sentInWindow * 1000) / windowMs;
+      if (avgFps < (this.opts.fps - 0.5)) {
+        console.warn(
+          `[ArtNet] Average output below target: ${avgFps.toFixed(2)}fps (target ${this.opts.fps}fps, samples ${this.sentInWindow}/${windowMs.toFixed(0)}ms)`
+        );
+      }
+      this.fpsWindowStartMs = sendNow;
+      this.sentInWindow = 0;
+    }
   }
 }

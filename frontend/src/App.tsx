@@ -29,6 +29,8 @@ export default function App() {
     4: blankDeck(4),
   });
   const [connected, setConnected] = useState(false);
+  const [sendWhenStopped, setSendWhenStopped] = useState(false);
+  const [settingBusy, setSettingBusy] = useState(false);
   const lastSeq = useRef(0);
 
   const wsUrl = useMemo(() => {
@@ -80,16 +82,64 @@ export default function App() {
     };
   }, [wsUrl]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/timecode/send-when-stopped')
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        setSendWhenStopped(data?.enabled === true);
+      })
+      .catch(() => {
+        // ignore
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleSendWhenStopped = async () => {
+    if (settingBusy) return;
+    setSettingBusy(true);
+    const next = !sendWhenStopped;
+    try {
+      const res = await fetch('/api/timecode/send-when-stopped', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      });
+      const data = await res.json();
+      setSendWhenStopped(data?.enabled === true);
+    } catch {
+      // ignore
+    } finally {
+      setSettingBusy(false);
+    }
+  };
+
   return (
-    <div className="grid">
-      {DECKS.map((d) => (
-        <DeckCard
-          key={d}
-          deck={d}
-          state={decks[d]}
-          connected={connected}
-        />
-      ))}
-    </div>
+    <>
+      <div className="grid">
+        {DECKS.map((d) => (
+          <DeckCard
+            key={d}
+            deck={d}
+            state={decks[d]}
+            connected={connected}
+          />
+        ))}
+      </div>
+
+      <div className="overlayToggle">
+        <button
+          className={`toggleBtn ${sendWhenStopped ? 'on' : 'off'}`}
+          onClick={toggleSendWhenStopped}
+          disabled={settingBusy}
+        >
+          {sendWhenStopped ? 'TC while stopped: ON' : 'TC while stopped: OFF'}
+        </button>
+      </div>
+    </>
   );
 }

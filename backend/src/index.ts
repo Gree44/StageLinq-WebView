@@ -3,12 +3,15 @@ import cors from 'cors';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import { createRequire } from 'node:module';
+import os from 'node:os';
 import path from 'node:path';
+import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { StageLinqBridge } from './stagelinqBridge.js';
 import type { DeckNumber, SnapshotPayload, WsPayload } from './types.js';
 import { ArtNetTimecodeBroadcaster } from './artnetTimecode.js';
+import { OscBpmSender } from './oscBpm.js';
 import { States, StageLinqValue } from "@gree44/stagelinq";
 import { logError, logLifecycle, logUiOut } from './logging.js';
 
@@ -88,31 +91,16 @@ interface RootConfig {
     universe?: number;
     address?: number;
   };
+  osc?: {
+    enabled?: boolean;
+    target_ip?: string;
+    target_port?: number;
+    speedmaster?: number;
+  };
   playlists?: Array<{
     name?: string;
     content?: ConfigTrack[];
   }>;
-}
-
-const RECENT_IPS_PATH = path.resolve(process.cwd(), '.stagelinq-recent-ips.json');
-
-async function loadRecentStageLinqIps(): Promise<string[]> {
-  try {
-    const raw = await fs.readFile(RECENT_IPS_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((v) => typeof v === 'string' && v.trim().length > 0);
-  } catch {
-    return [];
-  }
-}
-
-async function saveRecentStageLinqIps(ips: string[]): Promise<void> {
-  try {
-    await fs.writeFile(RECENT_IPS_PATH, JSON.stringify(ips, null, 2), 'utf8');
-  } catch (e: any) {
-    logError('[StageLinq] Failed to save recent IPs:', e?.message || e);
-  }
 }
 
 function stripJsonComments(input: string): string {
@@ -222,12 +210,24 @@ function coerceDmxPayload(packet: any): number[] {
   return [];
 }
 
-async function main() {
-  const config = await loadRootConfig();
-  const recentIps = await loadRecentStageLinqIps();
-  if (recentIps.length > 0) {
-    logLifecycle(`[StageLinq] Recent device IPs: ${recentIps.join(', ')}`);
+function getLocalIpv4Addresses(): string[] {
+  const ifaces = os.networkInterfaces();
+  const ips = new Set<string>();
+
+  for (const entries of Object.values(ifaces)) {
+    for (const entry of entries ?? []) {
+      if (entry.family === 'IPv4' && !entry.internal) {
+        ips.add(entry.address);
+      }
+    }
   }
+
+  return [...ips];
+}
+
+async function main() {
+  let config = await loadRootConfig();
+  let sendTimecodeWhenStopped = false;
 
   // Art-Net settings from root config.json (env vars override).
   const artnetEnabled = (process.env.ARTNET_ENABLED ?? 'true').toLowerCase() !== 'false';
@@ -239,20 +239,81 @@ async function main() {
   const artnetFpsType = 0x03;
   const artnetLatencyCompMs = Number(process.env.ARTNET_LATENCY_COMP_MS ?? 80);
 
+  const oscEnabled = (process.env.OSC_ENABLED ?? String(config?.osc?.enabled ?? false)).toLowerCase() === 'true';
+  const oscTargetIp = process.env.OSC_TARGET_IP ?? config?.osc?.target_ip ?? '127.0.0.1';
+  const oscTargetPort = Number(process.env.OSC_TARGET_PORT ?? config?.osc?.target_port ?? 8000);
+  const oscSpeedMaster = Number(process.env.OSC_SPEEDMASTER ?? config?.osc?.speedmaster ?? 15);
+
   // Control-input settings from root config.json (env vars override).
   const controlMode = String(process.env.CONTROL_INPUT_MODE ?? config?.control_input?.mode ?? 'sacn').toLowerCase();
   const sacnUniverse = Number(process.env.SACN_UNIVERSE ?? config?.control_input?.universe ?? 20);
   const controlAddress = Number(process.env.SACN_ADDRESS ?? config?.control_input?.address ?? 1);
   const controlChannelIndex = Math.max(0, controlAddress - 1);
 
-  const trackOffsets = buildTrackOffsetMap(config);
+  let trackOffsets = buildTrackOffsetMap(config);
+
+  let reloadInProgress = false;
+  const reloadConfig = async () => {
+    if (reloadInProgress) return;
+    reloadInProgress = true;
+    try {
+      const next = await loadRootConfig();
+      config = next;
+      trackOffsets = buildTrackOffsetMap(config);
+      logLifecycle(`[CONFIG] Reloaded. Offset entries: ${trackOffsets.size}`);
+    } catch (e: any) {
+      logError('[CONFIG] Reload failed:', e?.message || e);
+    } finally {
+      reloadInProgress = false;
+    }
+  };
+
+  // Hot reload via Ctrl+R (TTY only)
+  if (process.stdin.isTTY) {
+    readline.emitKeypressEvents(process.stdin);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+
+    process.stdin.on('keypress', (_str, key) => {
+      if (key?.ctrl && key?.name === 'r') {
+        logLifecycle('[CONFIG] Ctrl+R detected. Reloading config...');
+        void reloadConfig();
+      }
+      if (key?.ctrl && key?.name === 'c') {
+        process.emit('SIGINT');
+      }
+    });
+
+    const restoreTty = () => {
+      try {
+        if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      } catch {
+        // noop
+      }
+    };
+    process.once('exit', restoreTty);
+    process.once('SIGINT', restoreTty);
+    process.once('SIGTERM', restoreTty);
+  }
 
   const app = express();
   app.use(cors());
+  app.use(express.json());
 
   // API health
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, ts: Date.now() });
+  });
+
+  app.get('/api/timecode/send-when-stopped', (_req, res) => {
+    res.json({ enabled: sendTimecodeWhenStopped });
+  });
+
+  app.post('/api/timecode/send-when-stopped', (req, res) => {
+    const enabled = req?.body?.enabled === true;
+    sendTimecodeWhenStopped = enabled;
+    artnet.setSendWhenStopped(enabled);
+    res.json({ ok: true, enabled: sendTimecodeWhenStopped });
   });
 
   // Serve frontend build if present
@@ -268,10 +329,7 @@ async function main() {
     const bridge = new StageLinqBridge({
       downloadDbSources: false,
       onDeviceIp: (ip) => {
-        const next = [ip, ...recentIps.filter((x) => x !== ip)].slice(0, 5);
-        recentIps.splice(0, recentIps.length, ...next);
         logLifecycle(`[StageLinq] Device IP detected: ${ip}`);
-        void saveRecentStageLinqIps(recentIps);
       },
     });
   const require = createRequire(import.meta.url);
@@ -285,7 +343,10 @@ async function main() {
     fpsType: artnetFpsType,
     deck: artnetDeck,
     latencyCompMs: artnetLatencyCompMs,
+    sendWhenStopped: sendTimecodeWhenStopped,
   });
+
+  let oscBpm: OscBpmSender | null = null;
 
   let selectedDeck: DeckNumber | null = null;
   const setSelectedDeck = (nextDeck: DeckNumber | null, reason: string) => {
@@ -331,10 +392,12 @@ async function main() {
         });
 
         process.once('SIGINT', () => {
+          oscBpm?.stop();
           try { sACN.close(); } catch {}
           process.exit(0);
         });
         process.once('SIGTERM', () => {
+          oscBpm?.stop();
           try { sACN.close(); } catch {}
           process.exit(0);
         });
@@ -357,6 +420,17 @@ async function main() {
       logLifecycle('Connecting to StageLinq...');
       await bridge.connect();
       logLifecycle('StageLinq connected.');
+
+      if (oscEnabled && !oscBpm) {
+        oscBpm = new OscBpmSender({
+          enabled: oscEnabled,
+          targetIp: oscTargetIp,
+          targetPort: oscTargetPort,
+          speedMaster: oscSpeedMaster,
+        });
+        logLifecycle(`[OSC] BPM -> ${oscTargetIp}:${oscTargetPort} (SpeedMaster ${oscSpeedMaster})`);
+      }
+
       break;
     } catch (e: any) {
       logError('StageLinq connect failed:', e?.message || e);
@@ -368,7 +442,8 @@ async function main() {
     if (!selectedDeck) return undefined;
 
     const deck = bridge.getDeck(selectedDeck);
-      if (deck.play !== true) return undefined;
+    if (!sendTimecodeWhenStopped && deck.play !== true) return undefined;
+    if (Number(deck.elapsedSec) < 0) return undefined;
 
     const fileKey = normalizeTrackName(deck.fileName || '');
     const offset = trackOffsets.get(fileKey);
@@ -426,8 +501,19 @@ async function main() {
   // Broadcast snapshots at 30Hz
   // Broadcast snapshots at 30Hz
   const intervalMs = Math.round(1000 / WS_FPS);
+  let lastOscNoDeckLogAt = 0;
   setInterval(() => {
     const decks = bridge.getDecks();
+
+    if (selectedDeck && oscBpm) {
+      oscBpm.sendDeckBpm(decks[selectedDeck]);
+    } else if (oscEnabled && oscBpm) {
+      const now = Date.now();
+      if (now - lastOscNoDeckLogAt > 2000) {
+        lastOscNoDeckLogAt = now;
+        logLifecycle('[OSC] Waiting for selected deck (sACN control has not selected a deck yet).');
+      }
+    }
 
     const payload: SnapshotPayload = {
       type: 'snapshot',
@@ -452,8 +538,17 @@ async function main() {
 
 
   server.listen(PORT, '0.0.0.0', () => {
-    logLifecycle(`Web UI: http://0.0.0.0:${PORT}/`);
-    logLifecycle(`WS: ws://0.0.0.0:${PORT}/ws`);
+    const ips = getLocalIpv4Addresses();
+    if (ips.length === 0) {
+      logLifecycle(`Web UI: http://localhost:${PORT}/`);
+      logLifecycle(`WS: ws://localhost:${PORT}/ws`);
+      return;
+    }
+
+    for (const ip of ips) {
+      logLifecycle(`Web UI: http://${ip}:${PORT}/`);
+      logLifecycle(`WS: ws://${ip}:${PORT}/ws`);
+    }
   });
 }
 

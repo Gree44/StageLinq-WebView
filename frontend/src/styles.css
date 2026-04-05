@@ -225,3 +225,36 @@ html, body {
 .theme-d2 .art { outline: 2px solid rgba(47,123,255,0.35); }
 .theme-d3 .art { outline: 2px solid rgba(0,200,83,0.35); }
 .theme-d4 .art { outline: 2px solid rgba(255,45,45,0.35); }
+
+.overlayToggle {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 9999;
+}
+
+.toggleBtn {
+  border: 1px solid rgba(255,255,255,0.25);
+  background: rgba(10,10,10,0.78);
+  color: #fff;
+  border-radius: 999px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+
+.toggleBtn.on {
+  border-color: rgba(0, 210, 110, 0.8);
+  box-shadow: 0 0 0 1px rgba(0, 210, 110, 0.25) inset;
+}
+
+.toggleBtn.off {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.toggleBtn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

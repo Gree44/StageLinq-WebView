@@ -10,6 +10,12 @@
         "universe": 20,
         "address": 1
     },
+    "osc":{  
+        "enabled": true,
+        "target_ip": "10.15.10.117",
+        "target_port": 8000,
+        "speedmaster": 15
+    },
     "playlists": [
         {
             "name": "Playlist1",
@@ -22,6 +28,11 @@
                 {
                     "song_index": "LMFAO - Party Rock Anthem (Lyrics) ft. Lauren Bennett, GoonRock.mp3",
                     "offset_sec": 11400,
+                    "offset_frame": 0
+                },
+                {
+                    "song_index": "Bastille-Good_Grief__Don_Diablo_Remix_-Don_Diablo_Remix-76642405.mp3",
+                    "offset_sec": 12000,
                     "offset_frame": 0
                 }
             ]
