@@ -55,7 +55,7 @@ export class ArtNetTimecodeBroadcaster {
       });
     });
 
-    const sendHz = Math.max(this.opts.fps, Number(this.opts.sendHz ?? this.opts.fps * 2));
+    const sendHz = Math.max(1, Number(this.opts.sendHz ?? this.opts.fps));
     const intervalMs = Math.max(1, Math.round(1000 / sendHz));
     this.loop = setInterval(() => {
       const deckState = getDeckState();
@@ -76,13 +76,12 @@ export class ArtNetTimecodeBroadcaster {
 
   tick(deckState: DeckState) {
     if (!this.opts.enabled) return;
-    if (deckState.deck !== this.opts.deck) return;
 
     const nowMs = Date.now();
     const sourceSec = Number(deckState.elapsedSec) || 0;
     const sourceFrames = Math.max(0, sourceSec * this.opts.fps);
 
-    if (!deckState.play) {
+    if (deckState.play !== true) {
       // Keep internal clock in sync but suppress output when paused/stopped.
       this.timelineFrames = sourceFrames;
       this.lastTickMs = null;

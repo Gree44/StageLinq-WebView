@@ -1,4 +1,5 @@
 import type { DeckNumber, DeckState } from "./types.js";
+import path from "node:path";
 import { keyIndexToCamelot } from "./camelot.js";
 import { logBpmDebug, logDiscover, logDiscoverSpeed, logError, logLifecycle, logPlayback } from "./logging.js";
 
@@ -20,11 +21,20 @@ function roundToDigits(x: number, digits: number): number {
   return Math.round(x * p) / p;
 }
 
+function toFileName(v: unknown): string {
+  if (typeof v !== "string") return "";
+  const s = v.trim();
+  if (!s) return "";
+  return path.basename(s);
+}
+
 export interface BridgeOptions {
   downloadDbSources?: boolean; // kept for compatibility; unused by this library
+  onDeviceIp?: (ip: string) => void;
 }
 
 export class StageLinqBridge {
+  private opts: BridgeOptions;
   private decks: Record<DeckNumber, DeckState>;
 
   // Track last known playback state per deck to print only changes (optional logging)
@@ -74,6 +84,7 @@ export class StageLinqBridge {
   private lastElapsedEmitSec: Record<DeckNumber, number> = { 1: -1, 2: -1, 3: -1, 4: -1 };
 
   constructor(_opts: BridgeOptions = {}) {
+    this.opts = _opts;
     this.decks = Object.fromEntries(
       DECKS.map((d) => [d, this.blankDeck(d)])
     ) as Record<DeckNumber, DeckState>;
@@ -85,6 +96,7 @@ export class StageLinqBridge {
     return {
       deck,
       trackLoaded: false,
+      fileName: "",
       title: "—",
       artist: "—",
       elapsedSec: 0,
@@ -208,6 +220,22 @@ export class StageLinqBridge {
 
     const ds = this.decks[deck];
 
+    const fileNameFromTrackData =
+      toFileName(obj.fileName) ||
+      toFileName(obj.filename) ||
+      toFileName(obj.filePath) ||
+      toFileName(obj.filepath) ||
+      toFileName(obj.fullPath) ||
+      toFileName(obj.path) ||
+      toFileName(obj.uri) ||
+      toFileName(obj.songIndex) ||
+      toFileName(obj.song_index);
+
+    if (fileNameFromTrackData) {
+      ds.fileName = fileNameFromTrackData;
+      this.touch(deck);
+    }
+
     // --- duration ---
     // try common shapes/units
     const durSec =
@@ -295,12 +323,18 @@ export class StageLinqBridge {
     });
 
     devices.on?.("connected", (info: any) => {
+      if (typeof info?.address === "string" && info.address) {
+        this.opts.onDeviceIp?.(info.address);
+      }
       logLifecycle(
         `StageLinq connected: ${info?.address || ""} ${info?.software?.name || ""}`
       );
     });
 
     devices.on?.("deviceConnected", (info: any) => {
+      if (typeof info?.address === "string" && info.address) {
+        this.opts.onDeviceIp?.(info.address);
+      }
       logLifecycle(
         `StageLinq deviceConnected: ${info?.address || ""} ${info?.software?.name || ""}`
       );
@@ -362,6 +396,11 @@ export class StageLinqBridge {
 
       const tail = m[2];
       const ds = this.decks[deck];
+
+      if (/(?:Track\/)?(?:FileName|Filename|FilePath|Path)$/i.test(tail) && typeof rawValue === "string" && rawValue.trim()) {
+        ds.fileName = toFileName(rawValue);
+        this.touch(deck);
+      }
 
       // ---- Explicit track-loaded flag (if emitted by device) ----
       if (/TrackIsLoaded$/i.test(tail) || /IsLoaded$/i.test(tail)) {
@@ -571,6 +610,14 @@ export class StageLinqBridge {
 
 
       const ds = this.decks[deck];
+      const nowPlayingFileName =
+        toFileName(status?.fileName) ||
+        toFileName(status?.filename) ||
+        toFileName(status?.filePath) ||
+        toFileName(status?.path) ||
+        toFileName(status?.songIndex) ||
+        toFileName(status?.song_index);
+      if (nowPlayingFileName) ds.fileName = nowPlayingFileName;
       if (typeof status?.title === "string") {
         if (status.title.trim()) {
           ds.title = status.title;
@@ -762,6 +809,10 @@ export class StageLinqBridge {
           } else {
             this.unloadDeck(deck);
           }
+        }
+      } else if (/^(Track\/)?(FileName|Filename|FilePath|Path)$/i.test(tail)) {
+        if (typeof value === "string" && value.trim()) {
+          ds.fileName = toFileName(value);
         }
       } else if (tail === "CurrentKeyIndex" || tail === "Track/CurrentKeyIndex") {
         if (typeof value === "number") ds.keyIndex = value;

@@ -1,0 +1,30 @@
+{
+    "current_playlist": 0,
+    "timecode": {
+        "fps": 30.00,
+        "target_ip": "10.15.10.117",
+        "target_port": 6454
+    },
+    "control_input": {
+        "mode": "sacn",
+        "universe": 20,
+        "address": 1
+    },
+    "playlists": [
+        {
+            "name": "Playlist1",
+            "content": [
+                {
+                    "song_index": "01 Martin Garrix gravity intro v3.wav",
+                    "offset_sec": 10800,
+                    "offset_frame": 0
+                },
+                {
+                    "song_index": "LMFAO - Party Rock Anthem (Lyrics) ft. Lauren Bennett, GoonRock.mp3",
+                    "offset_sec": 11400,
+                    "offset_frame": 0
+                }
+            ]
+        }
+    ]
+}
