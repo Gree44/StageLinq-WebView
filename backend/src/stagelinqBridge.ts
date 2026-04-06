@@ -677,7 +677,7 @@ export class StageLinqBridge {
 
             // Throttle: only update if elapsed changed by >= 0.1s
             if (Math.abs(elapsed - this.lastElapsedEmitSec[deck]) >= 0.1) {
-              ds.elapsedSec = Math.max(0, elapsed);
+              ds.elapsedSec = elapsed;
               this.lastElapsedEmitSec[deck] = elapsed;
 
               if (!this.seen.elapsed) {
@@ -729,7 +729,7 @@ export class StageLinqBridge {
 
               // Throttle: only update if elapsed changed by >= 0.1s
               if (Math.abs(elapsed - this.lastElapsedEmitSec[deck]) >= 0.1) {
-                ds.elapsedSec = Math.max(0, elapsed);
+                ds.elapsedSec = elapsed;
                 this.lastElapsedEmitSec[deck] = elapsed;
 
                 if (!this.seen.elapsed) {

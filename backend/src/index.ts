@@ -443,7 +443,7 @@ async function main() {
 
     const deck = bridge.getDeck(selectedDeck);
     if (!sendTimecodeWhenStopped && deck.play !== true) return undefined;
-    if (Number(deck.elapsedSec) < 0) return undefined;
+    if (Number(deck.elapsedSec) <= 0) return undefined;
 
     const fileKey = normalizeTrackName(deck.fileName || '');
     const offset = trackOffsets.get(fileKey);

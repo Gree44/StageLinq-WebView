@@ -129,10 +129,21 @@ export class ArtNetTimecodeBroadcaster {
       this.timelineFrames = sourceFrames;
     }
 
+    // Do not emit before song position 00:00 (raw, pre-offset/pre-latency domain).
+    if (this.timelineFrames <= 0) {
+      return;
+    }
+
     this.lastTickMs = nowMs;
 
     const latencyCompFrames = (this.opts.fps * (this.opts.latencyCompMs ?? 80)) / 1000;
-    let totalFrames = Math.max(0, Math.floor(this.timelineFrames + latencyCompFrames));
+    const rawFramePos = this.timelineFrames + latencyCompFrames;
+    if (rawFramePos < 0) {
+      // Do not emit timecode before 00:00:00:00.
+      return;
+    }
+
+    let totalFrames = Math.floor(rawFramePos);
 
     // Prevent running past track end (can trigger after-roll warnings on some desks).
     const totalSec = Number(deckState.totalSec) || 0;
@@ -144,6 +155,10 @@ export class ArtNetTimecodeBroadcaster {
     // Send every loop tick (no frame-skipping), so receivers get continuous TC updates.
 
     const tc = framesToHMSF(totalFrames, this.opts.fps);
+    console.log(
+      `[ArtNet OUT] ${String(tc.hours).padStart(2, '0')}:${String(tc.minutes).padStart(2, '0')}:${String(tc.seconds).padStart(2, '0')}:${String(tc.frames).padStart(2, '0')} ` +
+      `(totalFrames=${totalFrames})`
+    );
     const pkt = buildArtNetTimecode(tc.hours, tc.minutes, tc.seconds, tc.frames, this.opts.fpsType);
     this.socket.send(pkt, 0, pkt.length, this.opts.port, this.opts.targetIp);
 
